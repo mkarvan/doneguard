@@ -1,0 +1,20 @@
+# Build output
+/doneguard
+/doneguard.exe
+/dist/
+*.test
+*.out
+
+# DoneGuard runtime data (retry state, session logs) — never commit.
+# Note: .doneguard.yml (the policy) is NOT ignored and should be committed.
+.doneguard/
+
+# Editor / OS junk
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Local review notes / scratch — never commit
+REVIEW-CODEX*
