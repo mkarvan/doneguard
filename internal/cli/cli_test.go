@@ -215,3 +215,183 @@ func TestInitRefusesSymlinkedConfigTarget(t *testing.T) {
 		t.Error("wrote outside the project")
 	}
 }
+
+func TestInitYesIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644)
+	a, out, errb := app(dir, "")
+	if code := a.Run([]string{"init", "--yes"}); code != 0 {
+		t.Fatalf("first run: code=%d stderr=%s", code, errb)
+	}
+	cfg := filepath.Join(dir, ".doneguard.yml")
+	data, err := os.ReadFile(cfg)
+	if err != nil || !strings.Contains(string(data), "go test ./...") {
+		t.Fatalf("config = %s (%v)", data, err)
+	}
+	if !strings.Contains(out.String(), "wrote ") {
+		t.Errorf("out = %s", out)
+	}
+	gi, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if !strings.Contains(string(gi), ".doneguard/") {
+		t.Errorf(".gitignore = %q", gi)
+	}
+
+	// The user edits the config; a second --yes run must keep it and succeed.
+	const mine = "# mine\nverify: []\n"
+	os.WriteFile(cfg, []byte(mine), 0o644)
+	for i := 0; i < 2; i++ {
+		a, out, errb = app(dir, "")
+		if code := a.Run([]string{"init", "--yes"}); code != 0 {
+			t.Fatalf("rerun %d: code=%d stderr=%s", i, code, errb)
+		}
+		if !strings.Contains(out.String(), "already exists") {
+			t.Errorf("rerun %d: out = %s", i, out)
+		}
+		if strings.Contains(out.String(), "added .doneguard/") {
+			t.Errorf("rerun %d: .gitignore touched again: %s", i, out)
+		}
+		if data, _ := os.ReadFile(cfg); string(data) != mine {
+			t.Fatalf("rerun %d: config overwritten: %q", i, data)
+		}
+	}
+	if gi2, _ := os.ReadFile(filepath.Join(dir, ".gitignore")); string(gi2) != string(gi) {
+		t.Errorf(".gitignore changed on rerun: %q", gi2)
+	}
+
+	// --force still overwrites, with or without --yes.
+	a, _, _ = app(dir, "")
+	if code := a.Run([]string{"init", "--yes", "--force"}); code != 0 {
+		t.Fatal("--yes --force failed")
+	}
+	if data, _ := os.ReadFile(cfg); !strings.Contains(string(data), "go test") {
+		t.Error("--yes --force did not overwrite")
+	}
+}
+
+func TestInitYesExistingYamlAndFlags(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "proj")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, ".doneguard.yaml"), []byte("verify: []\n"), 0o644)
+	a, out, errb := app(root, "")
+	if code := a.Run([]string{"init", "-y", "--dir", dir, "--no-gitignore"}); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errb)
+	}
+	if !strings.Contains(out.String(), ".doneguard.yaml already exists") {
+		t.Errorf("out = %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".doneguard.yml")); err == nil {
+		t.Error("wrote .doneguard.yml next to an existing .doneguard.yaml")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); err == nil {
+		t.Error("--no-gitignore not honoured")
+	}
+
+	// Fresh dir via --dir with --no-gitignore.
+	fresh := filepath.Join(root, "fresh")
+	os.MkdirAll(fresh, 0o755)
+	a, _, errb = app(root, "")
+	if code := a.Run([]string{"init", "--yes", "--dir", fresh, "--no-gitignore"}); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errb)
+	}
+	if _, err := os.Stat(filepath.Join(fresh, ".doneguard.yml")); err != nil {
+		t.Error("config not written in --dir")
+	}
+	if _, err := os.Stat(filepath.Join(fresh, ".gitignore")); err == nil {
+		t.Error("--no-gitignore not honoured")
+	}
+}
+
+func TestUsageMentionsInitYes(t *testing.T) {
+	a, out, _ := app(t.TempDir(), "")
+	a.Run([]string{"help"})
+	if !strings.Contains(out.String(), "--yes") {
+		t.Errorf("usage does not mention --yes:\n%s", out)
+	}
+}
+
+// init --yes must only accept a usable existing config. Anything else under the
+// config name would make it report success while the hook finds no policy.
+func TestInitYesRejectsUnusableConfigPath(t *testing.T) {
+	cases := map[string]func(t *testing.T, p string){
+		"directory": func(t *testing.T, p string) {
+			if err := os.Mkdir(p, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"dangling symlink": func(t *testing.T, p string) {
+			if err := os.Symlink(filepath.Join(filepath.Dir(p), "missing.yml"), p); err != nil {
+				t.Skip("symlinks unavailable:", err)
+			}
+		},
+		"symlink to directory": func(t *testing.T, p string) {
+			d := filepath.Join(filepath.Dir(p), "realdir")
+			os.Mkdir(d, 0o755)
+			if err := os.Symlink(d, p); err != nil {
+				t.Skip("symlinks unavailable:", err)
+			}
+		},
+	}
+	for name, setup := range cases {
+		for _, file := range []string{".doneguard.yml", ".doneguard.yaml"} {
+			t.Run(name+"/"+file, func(t *testing.T) {
+				dir := t.TempDir()
+				p := filepath.Join(dir, file)
+				setup(t, p)
+				a, out, errb := app(dir, "")
+				if code := a.Run([]string{"init", "--yes"}); code == 0 {
+					t.Fatalf("init --yes succeeded on %s; out=%s", name, out)
+				}
+				if strings.Contains(out.String(), "leaving it unchanged") {
+					t.Errorf("reported an existing config: %s", out)
+				}
+				if !strings.Contains(errb.String(), p) {
+					t.Errorf("stderr does not name %s: %s", p, errb)
+				}
+			})
+		}
+	}
+}
+
+func TestInitYesKeepsSymlinkToRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "policy.yml")
+	const mine = "verify: []\n"
+	os.WriteFile(real, []byte(mine), 0o644)
+	link := filepath.Join(dir, ".doneguard.yml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	a, out, errb := app(dir, "")
+	if code := a.Run([]string{"init", "--yes", "--no-gitignore"}); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errb)
+	}
+	if !strings.Contains(out.String(), "leaving it unchanged") {
+		t.Errorf("out = %s", out)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink replaced: %v %v", fi, err)
+	}
+	if data, _ := os.ReadFile(real); string(data) != mine {
+		t.Errorf("target modified: %q", data)
+	}
+}
+
+func TestInitPropagatesLstatErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := filepath.Join(t.TempDir(), "locked")
+	os.Mkdir(dir, 0o755)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Skip(err)
+	}
+	defer os.Chmod(dir, 0o755)
+	a, _, errb := app(dir, "")
+	if code := a.Run([]string{"init", "--yes"}); code == 0 {
+		t.Fatal("init --yes succeeded in an unreadable directory")
+	}
+	if !strings.Contains(errb.String(), "permission denied") {
+		t.Errorf("stderr = %s", errb)
+	}
+}

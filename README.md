@@ -24,6 +24,22 @@ Fix the failing tests/checks, re-run `go test ./...` until it passes, then you m
 It ships as a single static Go binary with no runtime dependencies. DoneGuard itself
 makes no network calls and is local only (your verify commands and Codex may). Tested against Claude Code 2.1.x and Codex CLI 0.170.
 
+## For AI agents
+
+Asked to install DoneGuard into a project? Follow
+[AGENTS.md → Installing DoneGuard into a user's project](AGENTS.md#installing-doneguard-into-a-users-project).
+The same steps in plain text: [llms.txt](llms.txt). In short:
+
+1. Get a working binary: use an existing `doneguard`, else `go install` (Go 1.23+),
+   else download `install.sh` to a file with `curl -fsSL -o`, check the exit status,
+   and run `sh install.sh`. Agents should not pipe it into `sh`.
+2. Require `doneguard version` to succeed. **If it doesn't, stop**: don't run `init` or
+   `install`, and don't edit the project.
+3. `doneguard init --yes` (non-interactive, safe to re-run), then
+   `doneguard install --agent claude` (or `--agent codex`, or no flag for both).
+4. Check that both `Stop` and `SubagentStop` in the hook file run
+   `<path>/doneguard hook --source ...`.
+
 ## Motivation
 
 The **Runta FrontierHarness Eval** (November 2026, 27,280 runs, with Baseten) found
@@ -37,7 +53,7 @@ own false-done rate with `doneguard report`.
 
 ## Install
 
-Requires **Go 1.23+**.
+With **Go 1.23+**:
 
 ```sh
 go install github.com/mkarvan/doneguard/cmd/doneguard@latest
@@ -45,6 +61,25 @@ go install github.com/mkarvan/doneguard/cmd/doneguard@latest
 
 This puts `doneguard` in `$(go env GOBIN)` (default `$(go env GOPATH)/bin`). To pin a
 release, use a tag instead of `@latest`, e.g. `@v0.1.0`.
+
+Without Go, install a prebuilt binary (Linux and macOS, amd64 and arm64; no sudo).
+Download the script, read it if you like, then run it:
+
+```sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/mkarvan/doneguard/main/scripts/install.sh
+less install.sh   # optional; it's short
+sh install.sh
+```
+
+The script downloads `doneguard-<version>-<os>-<arch>` and `checksums.txt` over HTTPS
+from the [latest release](https://github.com/mkarvan/doneguard/releases), verifies the
+SHA-256, installs to `~/.local/bin/doneguard` (add `~/.local/bin` to your `PATH` if it
+isn't already) and checks that the installed binary runs; any failure exits nonzero.
+Once you've read it, `curl -fsSL <url> | sh` works too. curl is preferred (downloads
+and redirects are restricted to HTTPS); wget is a fallback.
+
+`DONEGUARD_VERSION=v0.1.0` pins a release, `DONEGUARD_BIN_DIR=/some/dir` changes the
+install directory, and `sh install.sh --dry-run` shows what it would do.
 
 From source:
 
@@ -63,6 +98,8 @@ Common setup, in your project (a git repository):
 cd ~/code/my-project
 doneguard init                 # writes .doneguard.yml (auto-detects your test command)
                                # and adds .doneguard/ to .gitignore
+                               # (scripts/agents: `doneguard init --yes` never fails
+                               #  if a config already exists)
 git add .doneguard.yml .gitignore && git commit -m "Add DoneGuard"
 ```
 
@@ -224,7 +261,7 @@ indeterminate.
 
 | Command | What it does |
 |---|---|
-| `doneguard init [--force] [--dir D] [--no-gitignore]` | Writes `.doneguard.yml` with auto-detected verify commands and default protected globs, and appends `.doneguard/` to `.gitignore`. Refuses to overwrite an existing config without `--force`. |
+| `doneguard init [--yes] [--force] [--dir D] [--no-gitignore]` | Writes `.doneguard.yml` with auto-detected verify commands and default protected globs, and appends `.doneguard/` to `.gitignore`. Refuses to overwrite an existing config without `--force` (exit 1). With `--yes` (`-y`) it is non-interactive and idempotent: an existing config file (or symlink to one) is left unchanged and init exits 0, so scripts and agents can run it repeatedly; a directory or dangling symlink at the config path is an error. |
 | `doneguard install [--agent claude\|codex\|all] [--local] [--global] [--exe PATH] [--timeout S]` | Merges Stop + SubagentStop hooks into `.claude/settings.json` (or `settings.local.json` with `--local`) and `.codex/hooks.json`. Idempotent; never clobbers other hooks or settings; keeps key order. |
 | `doneguard uninstall [--agent …] [--local] [--global]` | Removes only DoneGuard's entries. Leaves other hooks and settings alone and never deletes the file. |
 | `doneguard hook [--source claude\|codex] [--exit2] [--verbose]` | Hook entry point (this is what the configs call). |

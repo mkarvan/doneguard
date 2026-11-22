@@ -58,7 +58,9 @@ func executable() (string, error) {
 const usage = `DoneGuard — don't let coding agents say "done" until the work is verified.
 
 Usage:
-  doneguard init [--force] [--dir DIR]   write .doneguard.yml (auto-detects verify commands)
+  doneguard init [--yes] [--force] [--dir DIR] [--no-gitignore]
+                                         write .doneguard.yml (auto-detects verify commands);
+                                         --yes: non-interactive, exits 0 if a config already exists
   doneguard install [flags]              merge Stop/SubagentStop hooks into .claude/settings.json and .codex/hooks.json
   doneguard uninstall [flags]            remove only DoneGuard's hook entries
   doneguard hook [--source S] [--exit2]  hook entry point: reads hook JSON on stdin, prints a decision
@@ -116,8 +118,13 @@ func (a *App) cmdInit(args []string) int {
 	force := fs.Bool("force", false, "overwrite an existing .doneguard.yml")
 	dirFlag := fs.String("dir", "", "project directory (default: current directory)")
 	noGitignore := fs.Bool("no-gitignore", false, "do not add .doneguard/ to .gitignore")
+	yes := fs.Bool("yes", false, "non-interactive and idempotent: if a config already exists, keep it and exit 0 (use --force to overwrite)")
+	fs.BoolVar(yes, "y", false, "shorthand for --yes")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if fs.NArg() > 0 {
+		return a.errorf("init: unexpected argument %q", fs.Arg(0))
 	}
 	dir := *dirFlag
 	if dir == "" {
@@ -129,9 +136,18 @@ func (a *App) cmdInit(args []string) int {
 	}
 	dir, _ = filepath.Abs(dir)
 	path := filepath.Join(dir, config.FileNames[0])
-	for _, name := range config.FileNames {
-		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err == nil && !*force {
+	if !*force {
+		for _, name := range config.FileNames {
+			p := filepath.Join(dir, name)
+			if _, err := os.Lstat(p); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return a.errorf("%v", err)
+			}
+			if *yes {
+				return a.initExisting(dir, p, *noGitignore)
+			}
 			return a.errorf("%s already exists (use --force to overwrite)", p)
 		}
 	}
@@ -142,6 +158,9 @@ func (a *App) cmdInit(args []string) int {
 	found := detect.Detect(dir)
 	if err := writeConfig(target, []byte(detect.Render(found)), *force); err != nil {
 		if errors.Is(err, os.ErrExist) {
+			if *yes {
+				return a.initExisting(dir, path, *noGitignore)
+			}
 			return a.errorf("%s already exists (use --force to overwrite)", path)
 		}
 		return a.errorf("%v", err)
@@ -155,15 +174,60 @@ func (a *App) cmdInit(args []string) int {
 	}
 	fmt.Fprintf(a.Stdout, "  protected: %s\n", strings.Join(detect.DefaultProtected, ", "))
 	if !*noGitignore {
-		changed, err := detect.EnsureGitignore(dir)
-		if err != nil {
-			fmt.Fprintf(a.Stderr, "doneguard: could not update .gitignore: %v\n", err)
-		} else if changed {
-			fmt.Fprintln(a.Stdout, "added .doneguard/ to .gitignore")
-		}
+		a.ensureGitignore(dir)
 	}
 	fmt.Fprintln(a.Stdout, "next: commit .doneguard.yml, then run `doneguard install`")
 	return 0
+}
+
+// initExisting is `init --yes` on a project that already has a config: the
+// config is left untouched (overwriting stays --force only) and init succeeds,
+// so agents can run it repeatedly.
+//
+// Only a regular file (or a symlink to one) counts as an existing config. A
+// directory, a dangling symlink or any other entry under the config name is an
+// error: reporting success there would let the agent believe a policy exists
+// when the hook will find none and allow every stop.
+func (a *App) initExisting(dir, path string, noGitignore bool) int {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return a.errorf("%s is a dangling symlink; remove it or fix its target, then re-run init", path)
+		}
+		return a.errorf("%s exists but cannot be read: %v", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return a.errorf("%s exists but is not a regular file (%s); remove or rename it, then re-run init", path, describeMode(fi.Mode()))
+	}
+	fmt.Fprintf(a.Stdout, "%s already exists; leaving it unchanged (use --force to overwrite)\n", path)
+	if !noGitignore {
+		a.ensureGitignore(dir)
+	}
+	return 0
+}
+
+func describeMode(m os.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "a directory"
+	case m&os.ModeNamedPipe != 0:
+		return "a named pipe"
+	case m&os.ModeSocket != 0:
+		return "a socket"
+	case m&os.ModeDevice != 0:
+		return "a device"
+	default:
+		return "mode " + m.String()
+	}
+}
+
+func (a *App) ensureGitignore(dir string) {
+	changed, err := detect.EnsureGitignore(dir)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "doneguard: could not update .gitignore: %v\n", err)
+	} else if changed {
+		fmt.Fprintln(a.Stdout, "added .doneguard/ to .gitignore")
+	}
 }
 
 // writeConfig creates the config exclusively unless force is set, so two

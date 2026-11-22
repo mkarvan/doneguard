@@ -1,0 +1,99 @@
+# DoneGuard
+
+> Blocks AI coding agents (Claude Code, Codex CLI) from ending their turn until the
+> project's checks pass.
+
+DoneGuard is a single static Go binary. It registers itself on the Stop and
+SubagentStop hooks. When the agent tries to stop, it runs the verify commands from
+.doneguard.yml (tests, lint, type-check) and checks, via git, that no protected paths
+(.env, keys, secrets) were touched. On failure the stop is blocked and the agent gets
+the failing command and its output, up to a retry cap (default 3, max 7); after that
+the stop is allowed and logged as UNVERIFIED. DoneGuard makes no network calls.
+
+Repository: https://github.com/mkarvan/doneguard
+Full agent guide: https://github.com/mkarvan/doneguard/blob/main/AGENTS.md
+README: https://github.com/mkarvan/doneguard/blob/main/README.md
+
+## Install into a user's project (non-interactive, safe to re-run)
+
+1. Get the binary. If you cannot get a working `doneguard version`, STOP: do not run
+   init or install and do not edit the project; tell the user what failed.
+
+   a. If `doneguard version` already exits 0, use it.
+
+   b. Else, if `go version` reports Go 1.23 or newer:
+        go install github.com/mkarvan/doneguard/cmd/doneguard@latest &&
+          export PATH="$(go env GOPATH)/bin:$PATH" &&
+          doneguard version
+      (if `go env GOBIN` is set, put it on PATH too). Nonzero exit: try c.
+
+   c. Else (Linux/macOS amd64/arm64, no sudo, HTTPS only, SHA-256 verified), download
+      the script to a file, check the download, then run it and check that too.
+      Agents: do not pipe it into sh.
+        dg_tmp=$(mktemp -d) &&
+          curl -fsSL --proto '=https' --proto-redir '=https' -o "$dg_tmp/install.sh" \
+            https://raw.githubusercontent.com/mkarvan/doneguard/main/scripts/install.sh
+        (nonzero exit: stop; optionally read "$dg_tmp/install.sh")
+        sh "$dg_tmp/install.sh" &&
+          export PATH="$HOME/.local/bin:$PATH" &&
+          doneguard version
+        (nonzero exit: stop)
+      The script installs to ~/.local/bin/doneguard and exits nonzero if the download,
+      checksum or the installed binary's `version` fails. Optional:
+      DONEGUARD_VERSION=v0.1.0 pins a release; DONEGUARD_BIN_DIR changes the install
+      directory. Humans who have read the script may use `curl -fsSL <url> | sh`.
+
+   Required: `doneguard version` exits 0 and prints a version. Re-export PATH in later
+   steps if each command runs in a fresh shell.
+
+2. cd to the root of the user's project (a git repository). If it isn't one, only
+   `git init` when that is clearly appropriate; otherwise tell the user (protected-path
+   checks need git) and continue.
+
+3. Create the config (auto-detects verify commands; keeps an existing config file,
+   exit 0; exits nonzero if .doneguard.yml/.yaml is a directory or dangling symlink:
+   stop and tell the user):
+     doneguard init --yes
+
+4. Register the hooks for the agent in use:
+     doneguard install --agent claude    # Claude Code -> .claude/settings.json
+     doneguard install --agent codex     # Codex CLI   -> .codex/hooks.json
+     doneguard install                   # both / not sure
+   install is idempotent and never touches other hooks or settings.
+
+## Verify
+
+  doneguard version
+  doneguard report    (optional; empty until the first stop)
+
+Check the JSON, not just a grep: .claude/settings.json (and/or .codex/hooks.json) must
+have, under BOTH hooks.Stop and hooks.SubagentStop, a hook with "type": "command" and
+"command": "<absolute path>/doneguard hook --source claude" (or --source codex).
+With jq (exits 0 only if both events have it; use codex / .codex/hooks.json for Codex):
+  jq -e --arg src claude '. as $r | all("Stop", "SubagentStop"; . as $e |
+    any($r.hooks[$e][]?.hooks[]?; .type == "command" and
+      (.command | test("doneguard\\x27? hook --source " + $src + "$"))))' .claude/settings.json
+If an event is missing, re-run `doneguard install`; don't hand-edit.
+
+Then tell the user:
+- Claude Code: restart Claude Code so the hooks load (check with /hooks).
+- Codex: trust the project and approve the hook. These are separate:
+  `codex exec --trust` saves project trust; approving happens in /hooks;
+  `--dangerously-bypass-hook-trust` skips hook review for one run and is only for
+  automation that has already vetted the hook. See "Codex hook trust" in the README.
+
+## Uninstall
+
+  doneguard uninstall                  (or --agent claude / --agent codex)
+Removes only DoneGuard's hook entries.
+
+## Do not
+
+- Hand-edit .claude/settings.json or .codex/hooks.json to add hooks; use
+  doneguard install / doneguard uninstall.
+- Commit .doneguard/ (session logs, retry state; init gitignores it). Do commit
+  .doneguard.yml.
+- Use `doneguard init --force` unless the user explicitly asked to overwrite the config.
+- Put secrets in the hook command or the config.
+- Run `doneguard install --global` unless the user asked.
+- Weaken .doneguard.yml to get past a blocked stop; fix the failing check instead.
