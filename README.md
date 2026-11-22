@@ -40,6 +40,13 @@ The same steps in plain text: [llms.txt](llms.txt). In short:
 4. Check that both `Stop` and `SubagentStop` in the hook file run
    `<path>/doneguard hook --source ...`.
 
+### Using Grok Bot?
+
+Add the [DoneGuard bot template](https://x.ai/bot/OSQ3d23RwqYlZnw8wU7Q3). It verifies work
+before calling it done (runs your checks, inspects the diff, reports UNVERIFIED honestly),
+and on first run it asks for your repo, test commands, and protected files, then installs
+DoneGuard for you.
+
 ## Motivation
 
 The **Runta FrontierHarness Eval** (November 2026, 27,280 runs, with Baseten) found
